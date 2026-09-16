@@ -36,6 +36,8 @@
 extern void inv_dcache_range(uintptr_t start, size_t size);
 extern void flush_dcache_range(uintptr_t start, size_t size);
 
+static struct dma_device dma_controller;
+
 static volatile struct dmac_reg * const dmac =
     (volatile struct dmac_reg *)DMAC_BASE_ADDR;
 
@@ -349,6 +351,72 @@ static int dma_map_request(unsigned int ch_idx, unsigned char req_id)
     return 0;
 }
 
+int dma_lock_init(void)
+{
+    int i = 0;
+
+    dma_controller.dma_init_flag = 0;
+    dma_controller.dma_irq_register_flag = 0;
+    dma_controller.dma_shared_lock = xSemaphoreCreateBinary();
+
+    if (dma_controller.dma_shared_lock == NULL)
+        goto fail;
+
+
+    for (i = 0; i < DW_DMA_CH_NUM; ++i)
+    {
+        struct dma_channel *ch = &dma_controller.ch[i];
+        ch->lock = xSemaphoreCreateMutex();
+        if (ch->lock == NULL)
+        {
+            goto fail;
+        }
+
+        ch->done = xSemaphoreCreateBinary();
+        if (ch->done == NULL)
+        {
+            vSemaphoreDelete(ch->lock);
+            ch->lock = NULL;
+            goto fail;
+        }
+    }
+
+    xSemaphoreGive(dma_controller.dma_shared_lock);
+    for (int i = 0; i < DW_DMA_CH_NUM; ++i)
+    {
+        struct dma_channel *ch = &dma_controller.ch[i];
+        xSemaphoreGive(ch->lock);
+    }
+
+    return 0;
+
+fail:
+
+    if (dma_controller.dma_shared_lock != NULL)
+    {
+        vSemaphoreDelete(dma_controller.dma_shared_lock);
+        dma_controller.dma_shared_lock = NULL;
+    }
+
+    for (i = 0; i < DW_DMA_CH_NUM; ++i)
+    {
+        struct dma_channel *ch = &dma_controller.ch[i];
+        if (ch->done != NULL)
+        {
+            vSemaphoreDelete(ch->done);
+            ch->done = NULL;
+        }
+
+        if (ch->lock != NULL)
+        {
+            vSemaphoreDelete(ch->lock);
+            ch->lock = NULL;
+        }
+    }
+    return -1;
+}
+
+
 /*-----------------------------------------------------------*/
 /* DMA initialisation                                          */
 /*-----------------------------------------------------------*/
@@ -368,6 +436,25 @@ int dma_init(void)
 {
     unsigned int ch;
 
+    if (dma_controller.dma_init_flag == 1)
+        return 0;
+
+    while ( xSemaphoreTake(dma_controller.dma_shared_lock, NULL) != pdTRUE )
+    {
+        if (dma_controller.dma_init_flag == 1)
+        {
+            return 0;
+        }
+
+        vTaskDelay(1);
+    }
+
+    if (dma_controller.dma_init_flag == 1)
+    {
+        xSemaphoreGive(dma_controller.dma_shared_lock);
+        return 0;
+    }
+    
     /*
      * 1. Enable DMAC AXI clock.
      */
@@ -392,6 +479,9 @@ int dma_init(void)
      */
     for (ch = 0; ch < DW_DMA_CH_NUM; ++ch)
         dma_channel_disable(ch);
+
+    dma_controller.dma_init_flag = 1;
+    xSemaphoreGive(dma_controller.dma_shared_lock);
 
     return 0;
 }
@@ -807,10 +897,18 @@ int dma_prepare_list_transfer(struct dma_transfer_config *config)
  */
 int dma_prepare(struct dma_transfer_config *config)
 {
+    int ret = -1;
+    SemaphoreHandle_t *ch_lock = &dma_controller.ch[config->ch_idx].lock;
+
+    while ( xSemaphoreTake(*ch_lock, NULL) != pdTRUE )
+    {
+        vTaskDelay(1);
+    }
+
     switch (config->multblk_type)
     {
     case CONTIGUOUS:
-        return dma_prepare_transfer(config);
+        ret = dma_prepare_transfer(config);
         break;
 
     case RELOAD:
@@ -820,14 +918,19 @@ int dma_prepare(struct dma_transfer_config *config)
         break;
 
     case LINK_LIST:
-        return dma_prepare_list_transfer(config);
+        ret = dma_prepare_list_transfer(config);
         break;
 
     default:
         break;
     }
 
-    return -1;
+    if (ret != 0)
+    {
+        xSemaphoreGive(*ch_lock);
+    }
+
+    return ret;
 }
 
 /* ============================================================
@@ -988,6 +1091,7 @@ int dma_stop(unsigned int ch_idx)
      */
     dma_channel_disable(ch_idx);
 
+    xSemaphoreGive(dma_controller.ch[ch_idx].lock);
     return 0;
 }
 
@@ -1139,6 +1243,7 @@ static int prvDmaISR(int irqn, void *priv)
         volatile struct dmac_ch_reg *ch = &dmac->ch[ch_idx];
         uint32_t status = dma_int_res.ch_status[ch_idx];
 
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         if (status == 0)
             continue;
 
@@ -1171,6 +1276,11 @@ static int prvDmaISR(int irqn, void *priv)
             dma_irq_result[ch_idx] = -1;
             dma_irq_done[ch_idx] = 1;
         }
+
+        xSemaphoreGiveFromISR(
+            dma_controller.ch[ch_idx].done,
+            &xHigherPriorityTaskWoken
+        );
     }
 
     /*
@@ -1199,7 +1309,7 @@ static int prvDmaISR(int irqn, void *priv)
  */
 int dma_irq_init(void)
 {
-    int ret;
+    int ret = 0;
 
     /*
      * Make sure all common interrupt signals are disabled.
@@ -1226,7 +1336,23 @@ int dma_irq_init(void)
      *
      * CPU2 System DMA IRQ = 25.
      */
-    if (!dma_irq_registered)
+    
+    if (dma_controller.dma_irq_register_flag == 1)
+    {
+        return 0;
+    }
+
+    
+    while ( xSemaphoreTake(dma_controller.dma_shared_lock, NULL) != pdTRUE )
+    {
+        if (dma_controller.dma_irq_register_flag == 1)
+        {
+            return 0;
+        }
+        vTaskDelay(1);
+    }
+    
+    if (dma_controller.dma_irq_register_flag == 0)
     {
         ret = request_irq(
             SDMA_INTR_CPU2,
@@ -1236,16 +1362,20 @@ int dma_irq_init(void)
             NULL
         );
 
+
         if (ret != 0)
         {
             dmac->cfg &= ~DMAC_CFG_INT_EN;
-            return -1;
         }
-
-        dma_irq_registered = 1;
+        else
+        {
+            dma_controller.dma_irq_register_flag = 1;
+        }
     }
 
-    return 0;
+    xSemaphoreGive(dma_controller.dma_shared_lock);
+
+    return ret;
 }
 
 
@@ -1391,40 +1521,45 @@ int dma_wait_irq(unsigned int ch_idx)
     if (ch_idx >= DW_DMA_CH_NUM)
         return -1;
 
-    while (!dma_irq_done[ch_idx])
+    if ( xSemaphoreTake(dma_controller.ch[ch_idx].done, portMAX_DELAY) != pdTRUE )
     {
-        /*
-         * Diagnostic fallback:
-         * if CHx_INTSTATUS is set but the ISR did not update the
-         * software flag yet, capture it here.  This also helps distinguish
-         * "DMA completed but IRQ routing failed" from "DMA never completed".
-         */
+        return -1;
+    }
 
-        uint32_t status = dma_int_res.ch_status[ch_idx];
-        if (dma_irq_done[ch_idx] && status != 0)
-        {
-            debug_dmac("DMA WAIT: CH%u INTSTATUS=0x%08x GLOBAL=0x%08x\\n",
-                   ch_idx, status, dma_int_res.global_status);
+    // while (!dma_irq_done[ch_idx])
+    // {
+    //     /*
+    //      * Diagnostic fallback:
+    //      * if CHx_INTSTATUS is set but the ISR did not update the
+    //      * software flag yet, capture it here.  This also helps distinguish
+    //      * "DMA completed but IRQ routing failed" from "DMA never completed".
+    //      */
 
-            ch = &dmac->ch[ch_idx];
-            dma_irq_status[ch_idx] = status;
-            ch->intclear = status;
+    //     uint32_t status = dma_int_res.ch_status[ch_idx];
+    //     if (dma_irq_done[ch_idx] && status != 0)
+    //     {
+    //         debug_dmac("DMA WAIT: CH%u INTSTATUS=0x%08x GLOBAL=0x%08x\\n",
+    //                ch_idx, status, dma_int_res.global_status);
 
-            if (status & (DMAC_CH_INTSTAT_DMA_TFR_DONE |
-                          DMAC_CH_INTSTAT_BLOCK_TFR_DONE))
-            {
-                dma_irq_result[ch_idx] = 0;
-                dma_irq_done[ch_idx] = 1;
-                break;
-            }
+    //         ch = &dmac->ch[ch_idx];
+    //         dma_irq_status[ch_idx] = status;
+    //         ch->intclear = status;
 
-            if (status & DMAC_CH_INTSTAT_ERR_MASK)
-            {
-                dma_irq_result[ch_idx] = -1;
-                dma_irq_done[ch_idx] = 1;
-                break;
-            }
-        }
+    //         if (status & (DMAC_CH_INTSTAT_DMA_TFR_DONE |
+    //                       DMAC_CH_INTSTAT_BLOCK_TFR_DONE))
+    //         {
+    //             dma_irq_result[ch_idx] = 0;
+    //             dma_irq_done[ch_idx] = 1;
+    //             break;
+    //         }
+
+    //         if (status & DMAC_CH_INTSTAT_ERR_MASK)
+    //         {
+    //             dma_irq_result[ch_idx] = -1;
+    //             dma_irq_done[ch_idx] = 1;
+    //             break;
+    //         }
+    //     }
     
         // if (--timeout == 0)
         // {
@@ -1466,7 +1601,7 @@ int dma_wait_irq(unsigned int ch_idx)
 
         //     return -2;
         // }
-    }
+    // }
 
     return dma_irq_result[ch_idx];
 }

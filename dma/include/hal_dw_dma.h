@@ -28,6 +28,10 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "hal_dw_list.h"
+#include "FreeRTOS.h"
+#include "projdefs.h"
+#include "semphr.h"
+#include "task.h"
 
 /*-----------------------------------------------------------*/
 
@@ -342,6 +346,59 @@ struct dw_desc {
 
 };
 
+/**
+ * @brief Per-channel DMA synchronization objects.
+ */
+struct dma_channel
+{
+    /**
+     * @brief Mutex protecting operations on the DMA channel.
+     *
+     * The lock prevents multiple tasks from accessing the same
+     * DMA channel concurrently.
+     */
+    SemaphoreHandle_t lock;
+
+    /**
+     * @brief Binary semaphore used to signal DMA transfer completion.
+     *
+     * The DMA interrupt handler releases this semaphore when the
+     * corresponding DMA transfer has completed.
+     */
+    SemaphoreHandle_t done;
+};
+
+/**
+ * @brief Global DMA device state.
+ */
+struct dma_device
+{
+    /**
+     * @brief Per-channel synchronization and completion objects.
+     */
+    struct dma_channel ch[DW_DMA_CH_NUM];
+
+    /**
+     * @brief Mutex protecting DMA resources shared by all channels.
+     */
+    SemaphoreHandle_t dma_shared_lock;
+
+    /**
+     * @brief Indicates whether the DMA controller has been initialized.
+     *
+     * A non-zero value indicates that DMA initialization has
+     * completed successfully.
+     */
+    volatile uint8_t dma_init_flag;
+
+    /**
+     * @brief Indicates whether the DMA interrupt handler has been registered.
+     *
+     * A non-zero value indicates that the DMA interrupt has already
+     * been registered.
+     */
+    volatile uint8_t dma_irq_register_flag;
+};
 
 /*-----------------------------------------------------------*/
 

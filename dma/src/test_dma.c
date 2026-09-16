@@ -53,6 +53,8 @@ enum DMA_OPTION {
     DMA_MEM_DEV_INT_LIST,
     DMA_DEV_MEM_POLLING_LIST,
     DMA_DEV_MEM_INT_LIST,
+
+    DMA_NUM_OF_MODE
 };
 
 typedef struct dma_params dma_params;
@@ -329,6 +331,7 @@ static int dma_benchmark(void *dst,
             debug_dmac("DMA start failed at iteration %d\n",
                    i);
 
+            dma_stop(ch_idx);
             return -1;
         }
 
@@ -1025,8 +1028,8 @@ static int dma_mem_mem_int_test(dma_params *params)
      * --------------------------------------------------------
      */
 
-    dma_stop(ch);
     dma_irq_disable(ch);
+    dma_stop(ch);
 
 
     if (ret != 0)
@@ -1489,8 +1492,8 @@ static int dma_int_lli_test(dma_params *params)
      * --------------------------------------------------------
      */
 
-    dma_stop(ch);
     dma_irq_disable(ch);
+    dma_stop(ch);
 
 
     if (ret != 0)
@@ -1988,8 +1991,8 @@ static int dma_mem_uart_int_test(device_uart dev_uart, unsigned int ch_idx)
         debug_dmac("DMA WAIT IRQ ERROR\n");
     }
 
-    dma_stop(ch_idx);
     dma_irq_disable(ch_idx);
+    dma_stop(ch_idx);
 
 
     debug_dmac("AFTER UART USR = 0x%0x\n", *usr);
@@ -2243,8 +2246,8 @@ static int dma_mem_uart_int_lli_test(device_uart dev_uart, unsigned int ch_idx)
      * --------------------------------------------------------
      */
 
-    dma_stop(ch_idx);
     dma_irq_disable(ch_idx);
+    dma_stop(ch_idx);
 
 
     if (ret != 0)
@@ -2831,8 +2834,8 @@ static int dma_uart_mem_int_test(device_uart dev_uart, unsigned int ch_idx)
     }
 
     /* Stop/disable interrupt regardless of success or failure. */
-    dma_stop(ch_idx);
     dma_irq_disable(ch_idx);
+    dma_stop(ch_idx);
 
     // ret = dma_dev_to_mem_irq(
     //     rx_buf,
@@ -3104,8 +3107,8 @@ static int dma_uart_mem_int_lli_test(device_uart dev_uart, unsigned int ch_idx)
      * --------------------------------------------------------
      */
 
-    dma_stop(ch_idx);
     dma_irq_disable(ch_idx);
+    dma_stop(ch_idx);
 
     if (ret != 0)
     {
