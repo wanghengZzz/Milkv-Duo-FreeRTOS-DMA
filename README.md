@@ -38,6 +38,51 @@ To run the DMA test, add the corresponding command to the `prvCmdQuRunTask` func
 duo-buildroot-sdk-1.1.4/freertos/cvitek/task/comm/src/riscv64/comm_main.c
 ```
 
+Please definitely initialize DMAC through `dma_lock_init` before starting task scheduler.
+
+Below shows an example to complete the initialization of DMAC:
+
+```C
+
+/* comm_main.c */
+
+...
+extern int dma_lock_init(void);
+
+void main_cvirtos(void)
+{
+	printf("create cvi task\n");
+
+	/* Start the tasks and timer running. */
+	request_irq(MBOX_INT_C906_2ND, prvQueueISR, 0, "mailbox", (void *)0);
+	main_create_tasks();
+
+	if (dma_lock_init() != 0)
+	{
+		printf("DMA LOCK INIT ERROR\n");
+	}
+
+    /* Start the tasks and timer running. */
+    vTaskStartScheduler();
+
+    /* If all is well, the scheduler will now be running, and the following
+    line will never be reached.  If the following line does execute, then
+    there was either insufficient FreeRTOS heap memory available for the idle
+    and/or timer tasks to be created, or vTaskStartScheduler() was called from
+    User mode.  See the memory management section on the FreeRTOS web site for
+    more details on the FreeRTOS heap http://www.freertos.org/a00111.html.  The
+    mode from which main() is called is set in the C start up code and must be
+    a privileged mode (not user mode). */
+    printf("cvi task end\n");
+	
+	for (;;)
+        ;
+}
+
+...
+
+```
+
 # DMA Features
 
 The driver currently supports:
