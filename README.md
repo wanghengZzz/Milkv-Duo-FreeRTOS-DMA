@@ -1,6 +1,6 @@
 # Milk-V Duo FreeRTOS DMA
 
-This project provides a hardware abstraction layer (HAL) for the DMA controller used by FreeRTOS running on the small C906 core (C906 @ 700 MHz) of the `Milk-V Duo`.
+This project provides a hardware abstraction layer (HAL) for the DMA controller used by FreeRTOS running on the small C906 core (RISC-V C906 @ 700 MHz) of the `Milk-V Duo`.
 
 The DMAC in the SG2002 SoC supports two transfer modes: Basic mode and Linked List mode. It supports data transfers between RAM and RAM, Memory and Device, Device and Memory, Device and Device, and more. See the SG2002 datasheet for more details.
 
